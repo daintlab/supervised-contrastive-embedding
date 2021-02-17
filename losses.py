@@ -57,8 +57,26 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
     def sample_pixels(self, label, n):
         cand_pixels = torch.nonzero(label)
         sample_idx = torch.randperm(cand_pixels.shape[0])[:n]
+#        if n == 0:
+#            sample_idx = []
+#        else:
+#            sample_idx = self._sample_balance(cand_pixels, n)
         sample_pixels = cand_pixels[sample_idx]
         return sample_pixels
+
+    def _sample_balance(self, cand_pixels, n):
+        batch_idx = cand_pixels[:,0]
+        bs = batch_idx.max() + 1
+        n_per_sample = n // bs
+        sample_idx = []
+        accum = 0
+        for b in range(bs):
+            n_features = int((batch_idx == b).sum().cpu())
+            temp_idx = np.random.permutation(n_features)[:n_per_sample] + accum
+            #sample_idx += torch.randperm(n_features)[:n_per_sample] + accum
+            sample_idx += temp_idx.tolist()
+            accum += n_features
+        return sample_idx
 
     def split_n(self, n, boundary_type, split_param=None):
         if boundary_type == 'full':
@@ -70,6 +88,11 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
         elif boundary_type == 'linear':
             current_epoch, max_epoch = split_param
             n_bd = int(current_epoch/max_epoch * n)
+            n_not_bd = n - n_bd
+            return n_bd, n_not_bd
+        elif boundary_type == 'quad':
+            current_epoch, max_epoch = split_param
+            n_bd = int(((current_epoch/max_epoch)**2) * n)
             n_not_bd = n - n_bd
             return n_bd, n_not_bd
 

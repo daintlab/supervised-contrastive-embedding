@@ -49,7 +49,8 @@ class SegModel(pl.LightningModule):
         self.num_layers = num_layers
         self.features_start = features_start
         self.use_ddp = use_ddp
-        self.max_epochs = kwargs['max_epochs']
+        if 'max_epochs' in kwargs.keys():
+            self.max_epochs = kwargs['max_epochs']
 
         self.net = UNet(num_classes=1, num_layers=self.num_layers,
                         features_start=self.features_start)
@@ -95,7 +96,9 @@ class SegModel(pl.LightningModule):
         self.log('train_loss', loss,
                  prog_bar=True, on_step=True, on_epoch=True)
         # metrics
-        metric_log = compute_performance(output, label, prefix='train')
+        metric_log = compute_performance(output, label,
+                                         metric=['dice'],
+                                         prefix='train')
         #import ipdb; ipdb.set_trace()
         self.log_dict(metric_log,
                       on_step=True,
@@ -114,7 +117,9 @@ class SegModel(pl.LightningModule):
         self.log('val_loss', loss,
                  prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         # metrics
-        metric_log = compute_performance(output, label, prefix='val')
+        metric_log = compute_performance(output, label,
+                                         metric=['dice','asd','acd'],
+                                         prefix='val')
         #import ipdb; ipdb.set_trace()
         self.log_dict(metric_log,
                       on_step=False,
