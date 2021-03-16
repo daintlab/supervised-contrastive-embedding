@@ -14,23 +14,27 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import CometLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-pl.utilities.seed.seed_everything(seed=1234)
 
 from unet import UNet
+from unet_models import U_Net
 from dataset import OrganData
 from losses import DiceLoss, PixelwiseContrastiveLoss
 from util import compute_performance
 
+import segmentation_models_pytorch as smp
 
 class SegModel(pl.LightningModule):
 
     def __init__(self,
                  data_path: str,
+                 arch: str,
                  batch_size: int,
                  lr: float = 0.01,
+                 optim: str = 'sgd',
                  loss_weight: float = 0.1,
                  n_max_pos: int = 128,
                  boundary_aware: bool = False,
+                 boundary_loc: str = 'both',
                  sampling_type: str = 'full',
                  neg_multiplier: int = 1,
                  num_layers: int = 4,
@@ -39,11 +43,14 @@ class SegModel(pl.LightningModule):
                  **kwargs):
         super().__init__()
         self.data_path = data_path
+        self.arch = arch
         self.batch_size = batch_size
         self.lr = lr
+        self.optim = optim
         self.loss_weight = loss_weight
         self.n_max_pos = n_max_pos
         self.boundary_aware = boundary_aware
+        self.boundary_loc = boundary_loc
         self.sampling_type = sampling_type
         self.neg_multiplier = neg_multiplier
         self.num_layers = num_layers
@@ -52,11 +59,38 @@ class SegModel(pl.LightningModule):
         if 'max_epochs' in kwargs.keys():
             self.max_epochs = kwargs['max_epochs']
 
-        self.net = UNet(num_classes=1, num_layers=self.num_layers,
-                        features_start=self.features_start)
+        if self.arch == 'unet':
+            self.net = smp.Unet(encoder_name='resnet34',
+                                encoder_depth=self.num_layers,
+                                encoder_weights=None,
+                                decoder_channels=[256,128,64,32,16],
+                                in_channels=1,
+                                classes=1)
+        elif self.arch == 'unetpp':
+            self.net = smp.UnetPlusPlus(encoder_name='resnet34',
+                                        encoder_depth=self.num_layers,
+                                        encoder_weights=None,
+                                        decoder_channels=[256,128,64,32,16],
+                                        in_channels=1,
+                                        classes=1)
+        elif self.arch =='dlabv3':
+            self.net = smp.DeepLabV3(encoder_name='resnet34',
+                                    encoder_depth=self.num_layers,
+                                    encoder_weights=None,
+                                    decoder_channels=512,
+                                    in_channels=1,
+                                    classes=1,
+                                    upsampling=8)
+        elif self.arch == 'dlabv3p':
+            self.net = smp.DeepLabV3Plus(encoder_name='resnet34',
+                                    encoder_depth=self.num_layers,
+                                    encoder_weights=None,
+                                    decoder_channels=256,
+                                    in_channels=1,
+                                    classes=1)
 
         self.train_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.3, contrast=0.3),
+            transforms.ColorJitter(brightness=0.4, contrast=0.4),
             transforms.ToTensor(),
             transforms.Normalize([0.5],[0.5])])
 
@@ -74,6 +108,7 @@ class SegModel(pl.LightningModule):
         self.cont_loss = PixelwiseContrastiveLoss(neg_multiplier=self.neg_multiplier,
                                                   n_max_pos=self.n_max_pos,
                                                   boundary_aware=self.boundary_aware,
+                                                  boundary_loc=self.boundary_loc,
                                                   sampling_type=self.sampling_type)
 
     def forward(self, x):
@@ -87,9 +122,15 @@ class SegModel(pl.LightningModule):
 
         cont_loss = self.cont_loss(embedding, resized_label,
                                    split_param=(self.current_epoch, self.max_epochs))
-        loss = self.bce_loss(output, label) + \
-               self.dice_loss(output, label) + \
-               self.loss_weight * cont_loss
+
+        if self.loss_weight == 0.0:
+            loss = self.bce_loss(output, label) + \
+                self.dice_loss(output, label)
+            #loss = self.bce_loss(output, label)
+        else:
+            loss = self.bce_loss(output, label) + \
+                self.dice_loss(output, label) + \
+                self.loss_weight * cont_loss
 
         self.log('train_cont_loss', cont_loss,
                  prog_bar=True, on_step=True, on_epoch=True)
@@ -112,13 +153,14 @@ class SegModel(pl.LightningModule):
         img = img.float()
 
         output, _ = self(img)
-        loss = self.bce_loss(output, label) + self.dice_loss(output, label)
+        #loss = self.bce_loss(output, label) + self.dice_loss(output, label)
+        loss = self.bce_loss(output, label)
 
         self.log('val_loss', loss,
                  prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         # metrics
         metric_log = compute_performance(output, label,
-                                         metric=['dice','asd','acd'],
+                                         metric=['confusion','dice','asd','acd'],
                                          prefix='val')
         #import ipdb; ipdb.set_trace()
         self.log_dict(metric_log,
@@ -129,14 +171,27 @@ class SegModel(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        opt = torch.optim.SGD(self.net.parameters(),
-                              lr=self.lr,
-                              momentum=0.9,
-                              weight_decay=0.0001)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(opt,
-                                                         milestones=[80,100],
-                                                         gamma=0.1)
-        return [opt], [scheduler]
+        if self.optim == 'sgd':
+            opt = torch.optim.SGD(self.net.parameters(),
+                                lr=self.lr,
+                                momentum=0.9,
+                                weight_decay=0.0001)
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(opt,
+                            milestones=[int(6/10*self.max_epochs),
+                                        int(8/10*self.max_epochs)],
+                            gamma=0.1)
+            return [opt], [scheduler]
+        if self.optim == 'adam':
+            opt = torch.optim.Adam(self.net.parameters(),
+                                   lr=self.lr,
+                                   eps=1e-4,
+                                   weight_decay=0.0005)
+            scheduler = torch.optim.lr_scheduler.MultiStepLR(opt,
+                            milestones=[int(5/8*self.max_epochs),
+                                        int(7/8*self.max_epochs)],
+                            gamma=0.2)
+            return [opt], [scheduler]
+
 
     def train_dataloader(self):
         if self.use_ddp:
@@ -180,16 +235,19 @@ class SegModel(pl.LightningModule):
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser])
         parser.add_argument("--data-path", type=str, default='/daintlab/data/segmentation/lits')
+        parser.add_argument("--arch", type=str, choices=['unet','unetpp','dlabv3','dlabv3p'])
         parser.add_argument("--batch-size", type=int, default=32)
         parser.add_argument("--lr", type=float, default=0.01)
+        parser.add_argument("--optim", type=str, default='sgd')
         parser.add_argument("--loss-weight", type=float, default=1.0)
         parser.add_argument("--boundary-aware", action='store_true')
+        parser.add_argument("--boundary-loc", type=str, default='both')
         parser.add_argument("--sampling-type", type=str, default='full')
         parser.add_argument("--n-max-pos", type=int, default=128)
         parser.add_argument("--neg-multiplier", type=int, default=1)
         parser.add_argument("--num-layers", type=int, default=5)
         parser.add_argument("--features-start", type=int, default=64)
-        parser.add_argument("--max-epochs", type=int, default=110)
+        parser.add_argument("--max-epochs", type=int, default=120)
         parser.add_argument("--deterministic", type=bool, default=True)
 
         return parser
@@ -197,10 +255,12 @@ class SegModel(pl.LightningModule):
 
 def main(hparams):
 
+    project_name = os.environ.get("COMET_PROJECT_NAME")
+
     if hparams.logging:
         logger = CometLogger(api_key=os.environ.get('COMET_API_KEY'),
                             workspace='beopst',
-                            project_name='seg-with-cont',
+                            project_name=project_name,
                             experiment_name=hparams.exp)
         hparams.logger = logger
         hparams.logger.log_hyperparams(hparams)
@@ -209,6 +269,7 @@ def main(hparams):
     hparams.callbacks = [ckpt_callback]
 
     hparams.sync_batchnorm = True
+    hparams.precision = 16
 
     model = SegModel(**vars(hparams))
 
@@ -216,6 +277,9 @@ def main(hparams):
     trainer.fit(model)
 
 if __name__ == '__main__':
+
+    #seed = int(os.environ.get("PL_GLOBAL_SEED"))
+    #pl.utilities.seed.seed_everything(seed=seed)
 
     parser = ArgumentParser(add_help=False)
     parser.add_argument("--default-root-dir", type=str, default='./logs')

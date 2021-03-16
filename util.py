@@ -40,8 +40,10 @@ def compute_performance(output, label, metric, prefix=None, reduction='mean'):
             asd_2 = metrics.utils.get_surface_distance(edges_gt, edges_pred)
 
             if binary_output[b,c].sum() == 0: # failed to predict
-                asd[b,c] = np.nan
-                acd[b,c] = np.nan
+                #asd[b,c] = np.nan
+                #acd[b,c] = np.nan
+                asd[b,c] = 128 * np.sqrt(2) / 2
+                acd[b,c] = 128 * np.sqrt(2) / 2
             else:
                 asd[b,c] = (asd_1.sum() + asd_2.sum()) / (len(asd_1) + len(asd_2))
                 acd[b,c] = ((asd_1.sum()/len(asd_1)) + (asd_2.sum()/len(asd_2))) / 2

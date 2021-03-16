@@ -51,7 +51,8 @@ class OrganData(Dataset):
         label = Image.open(self.label_files[idx])
         seg_label = label.resize(self.size, resample=Image.NEAREST)
         #cont_label = label.resize((16,16), resample=Image.NEAREST)
-        cont_label = label.resize((64,64), resample=Image.NEAREST)
+        #cont_label = label.resize((64,64), resample=Image.NEAREST)
+        cont_label = label.resize((128,128), resample=Image.NEAREST)
         #cont_label = label.resize(self.size, resample=Image.NEAREST)
 
         if self.transform:
