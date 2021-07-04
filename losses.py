@@ -56,9 +56,7 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
         if not is_pos:
             real_label = 1 - real_label
 
-        #gt_b = F.max_pool2d(1 - real_label, kernel_size=3, stride=1, padding=1)
         gt_b = F.max_pool2d(1 - real_label, kernel_size=5, stride=1, padding=2)
-        #gt_b = F.max_pool2d(1 - real_label, kernel_size=7, stride=1, padding=3)
         gt_b_in = 1 - gt_b
         gt_b -= 1 - real_label
         return gt_b, gt_b_in
@@ -66,10 +64,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
     def sample_pixels(self, label, n):
         cand_pixels = torch.nonzero(label)
         sample_idx = torch.randperm(cand_pixels.shape[0])[:n]
-#        if n == 0:
-#            sample_idx = []
-#        else:
-#            sample_idx = self._sample_balance(cand_pixels, n)
         sample_pixels = cand_pixels[sample_idx]
         return sample_pixels
 
@@ -82,7 +76,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
         for b in range(bs):
             n_features = int((batch_idx == b).sum().cpu())
             temp_idx = np.random.permutation(n_features)[:n_per_sample] + accum
-            #sample_idx += torch.randperm(n_features)[:n_per_sample] + accum
             sample_idx += temp_idx.tolist()
             accum += n_features
         return sample_idx
@@ -98,37 +91,20 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
         elif boundary_type == 'exclude':
             return 0, valid_n
         elif boundary_type == 'random':
-            n_bd = int(torch.rand(1) * valid_n * 0.5)
+            n_bd = int(torch.rand(1) * valid_n)
             n_not_bd = valid_n - n_bd
             return n_bd, n_not_bd
         elif boundary_type == 'linear':
             current_epoch, max_epoch = split_param
-            n_bd = int(current_epoch/max_epoch * valid_n * 0.5)
+            n_bd = int(current_epoch/max_epoch * valid_n)
             n_not_bd = valid_n - n_bd
             return n_bd, n_not_bd
-#        elif boundary_type == 'linear-random':
-#            current_epoch, max_epoch = split_param
-#            ratio = current_epoch / max_epoch
-#            n_bd = int(torch.rand(1) * ratio * n)
-#            n_not_bd = n - n_bd
-#            return n_bd, n_not_bd
-#        elif boundary_type == 'quad':
-#            current_epoch, max_epoch = split_param
-#            n_bd = int(((current_epoch/max_epoch)**2) * n)
-#            n_not_bd = n - n_bd
-#            return n_bd, n_not_bd
         elif boundary_type == 'fixed':
-            n_bd = int(0.1 * valid_n)
+            n_bd = int(0.2 * valid_n)
             n_not_bd = valid_n - n_bd
             return n_bd, n_not_bd
 
     def forward(self, predict_seg_map, real_label, split_param=None, vector="embedding"):
-        # split_param: required when self.boundary_type is 'linear'
-        #              (current epoch, max epoch)
-
-        #if torch.distributed.get_rank() == 0:
-        #    print(predict_seg_map.shape, real_label.shape)
-
         if self.boundary_aware:
             if self.boundary_loc == 'pos':
                 pos_b, pos_b_in = self.extract_boundary(real_label)
@@ -136,8 +112,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
                                                       self.sampling_type,
                                                       limit=pos_b.sum(),
                                                       split_param=split_param)
-                #n_neg_bd = n_pos_bd
-                #n_neg_not_bd = self.n_max_neg - n_neg_bd
                 neg_b, neg_b_in = 1-real_label, 1-real_label
                 n_neg_bd, n_neg_not_bd = 0, self.n_max_neg
             elif self.boundary_loc == 'neg':
@@ -155,10 +129,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
                                                       self.sampling_type,
                                                       limit=pos_b.sum(),
                                                       split_param=split_param)
-                #n_neg_bd, n_neg_not_bd = self.split_n(self.n_max_neg,
-                #                                      self.sampling_type,
-                #                                      limit=neg_b.sum(),
-                #                                      split_param=split_param)
                 n_neg_bd = n_pos_bd
                 n_neg_not_bd = self.n_max_neg - n_neg_bd
         else:
@@ -179,11 +149,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
         neg_pixels = torch.cat((neg_b_pixels, neg_b_in_pixels), dim=0).detach()
         neg_pixels = tuple(neg_pixels.t())
 
-        #positive_pixels = real_label.nonzero(as_tuple=True)
-        #negative_pixels = (real_label==0).nonzero(as_tuple=True)
-
-        #positive_pixel = positive_pixels
-        #negative_pixel = negative_pixels
         if vector == "embedding" or vector == "first"  :
             positive_logits = predict_seg_map[pos_pixels[0], :, pos_pixels[2], pos_pixels[3]]
             negative_logits = predict_seg_map[neg_pixels[0], :, neg_pixels[2], neg_pixels[3]]
@@ -206,12 +171,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
             negative_logits = predict_seg_map[neg_pixels[0], :, neg_pixels[2], neg_pixels[3]]
             negative_logits = negative_logits[:int(len(negative_logits)/64)]
 
-        # random sampling
-#        pos_idx = torch.randperm(positive_logits.size()[0])[:self.n_max_pos]
-#        neg_idx = torch.randperm(negative_logits.size()[0])[:len(pos_idx)*self.neg_multiplier]
-#        positive_logits = positive_logits[pos_idx]
-#        negative_logits = negative_logits[neg_idx]
-#
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             all_positive_logits = SyncFunction.apply(positive_logits)
             all_negative_logits = SyncFunction.apply(negative_logits)
@@ -219,36 +178,10 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
             all_positive_logits = positive_logits
             all_negative_logits = negative_logits
 
-        #import ipdb; ipdb.set_trace()
-
-        #if torch.distributed.get_rank() == 0:
-        #    print(positive_logits.shape, negative_logits.shape)
-
-#        positive_sim = self.cosine(positive_logits.unsqueeze(1),
-#                                   all_positive_logits.unsqueeze(0))
-#        exp_positive_sim = torch.exp(positive_sim/self.temperature)
-#        off_diagonal = torch.ones(exp_positive_sim.shape).type_as(exp_positive_sim)
-#        off_diagonal = off_diagonal.fill_diagonal_(0.0)
-#        exp_positive_sim = exp_positive_sim * off_diagonal
-#        positive_row_sum = torch.sum(exp_positive_sim, dim=1)
-#
-#        negative_sim = self.cosine(positive_logits.unsqueeze(1),
-#                                   all_negative_logits.unsqueeze(0))
-#        exp_negative_sim = torch.exp(negative_sim/self.temperature)
-#        negative_row_sum = torch.sum(exp_negative_sim, dim=1)
-#
-#        likelihood = positive_row_sum / (positive_row_sum + negative_row_sum)
-#        nll = -torch.log(likelihood).mean()
-#
-#        return nll
-
         pos_nll = self._compute_loss(positive_logits,
                                      all_positive_logits,
                                      all_negative_logits)
-#        neg_nll = self._compute_loss(negative_logits,
-#                                     all_negative_logits,
-#                                     all_positive_logits)
-#        return (pos_nll + neg_nll)/2
+
         return pos_nll
 
     def _compute_loss(self, pos, all_pos, all_negs):
@@ -273,8 +206,6 @@ class PixelwiseContrastiveLoss(torch.nn.Module):
 
 def compute_per_channel_dice(input, target, epsilon=1e-5, ignore_index=None, weight=None):
     # assumes that input is a normalized probability
-
-    #target = target.unsqueeze(1)
 
     # input and target shapes must match
     assert input.size() == target.size(), "'input' and 'target' must have the same shape"

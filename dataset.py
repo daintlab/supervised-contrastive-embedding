@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 from PIL import Image
+import PIL.ImageOps
 
 import torch
 from torch.utils.data import Dataset
@@ -30,6 +31,12 @@ class OrganData(Dataset):
 
         self.common_transform = transforms.ToTensor()
 
+        if 'JSRT_dataset' in data_path.split('/'):
+            self.invert = True
+        else:
+            self.invert = False
+
+
     def check_validity(self,
                        inputs: list,
                        targets: list):
@@ -45,15 +52,14 @@ class OrganData(Dataset):
         return filename_list
 
     def __getitem__(self, idx):
-        img = Image.open(self.image_files[idx])
+        img = Image.open(self.image_files[idx]).convert("L")
+        if self.invert:
+            img = PIL.ImageOps.invert(img)
         img = img.resize(self.size)
 
-        label = Image.open(self.label_files[idx])
+        label = Image.open(self.label_files[idx]).convert("L")
         seg_label = label.resize(self.size, resample=Image.NEAREST)
-        #cont_label = label.resize((16,16), resample=Image.NEAREST)
-        #cont_label = label.resize((64,64), resample=Image.NEAREST)
         cont_label = label.resize((128,128), resample=Image.NEAREST)
-        #cont_label = label.resize(self.size, resample=Image.NEAREST)
 
         if self.transform:
             img = self.transform(img)
@@ -73,7 +79,3 @@ class OrganData(Dataset):
     def __len__(self):
         return len(self.image_files)
 
-if __name__ == '__main__':
-
-    data_root = '/daintlab/data/segmentation/lits/train'
-    dataset = OrganData(data_path=data_root)

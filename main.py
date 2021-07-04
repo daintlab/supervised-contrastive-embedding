@@ -1,4 +1,4 @@
-
+import comet_ml
 import os
 from argparse import ArgumentParser
 
@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.data import distributed
 from torchsummary import summary
 
@@ -14,9 +14,6 @@ import pytorch_lightning as pl
 from pytorch_lightning.loggers import CometLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-
-from unet import UNet
-from unet_models import U_Net
 from dataset import OrganData
 from losses import DiceLoss, PixelwiseContrastiveLoss
 from util import compute_performance
@@ -28,6 +25,7 @@ class SegModel(pl.LightningModule):
     def __init__(self,
                  data_path: str,
                  arch: str,
+                 encoder: str,
                  batch_size: int,
                  lr: float = 0.01,
                  optim: str = 'sgd',
@@ -44,6 +42,7 @@ class SegModel(pl.LightningModule):
         super().__init__()
         self.data_path = data_path
         self.arch = arch
+        self.encoder = encoder
         self.batch_size = batch_size
         self.lr = lr
         self.optim = optim
@@ -59,22 +58,25 @@ class SegModel(pl.LightningModule):
         if 'max_epochs' in kwargs.keys():
             self.max_epochs = kwargs['max_epochs']
 
+        if 'target_data_path' in kwargs.keys():
+            self.target_data_path = kwargs["target_data_path"]
+
         if self.arch == 'unet':
-            self.net = smp.Unet(encoder_name='resnet34',
+            self.net = smp.Unet(encoder_name=self.encoder,
                                 encoder_depth=self.num_layers,
                                 encoder_weights=None,
                                 decoder_channels=[256,128,64,32,16],
                                 in_channels=1,
                                 classes=1)
         elif self.arch == 'unetpp':
-            self.net = smp.UnetPlusPlus(encoder_name='resnet34',
+            self.net = smp.UnetPlusPlus(encoder_name=self.encoder,
                                         encoder_depth=self.num_layers,
                                         encoder_weights=None,
                                         decoder_channels=[256,128,64,32,16],
                                         in_channels=1,
                                         classes=1)
         elif self.arch =='dlabv3':
-            self.net = smp.DeepLabV3(encoder_name='resnet34',
+            self.net = smp.DeepLabV3(encoder_name=self.encoder,
                                     encoder_depth=self.num_layers,
                                     encoder_weights=None,
                                     decoder_channels=512,
@@ -82,7 +84,7 @@ class SegModel(pl.LightningModule):
                                     classes=1,
                                     upsampling=8)
         elif self.arch == 'dlabv3p':
-            self.net = smp.DeepLabV3Plus(encoder_name='resnet34',
+            self.net = smp.DeepLabV3Plus(encoder_name=self.encoder,
                                     encoder_depth=self.num_layers,
                                     encoder_weights=None,
                                     decoder_channels=256,
@@ -98,10 +100,30 @@ class SegModel(pl.LightningModule):
             transforms.ToTensor(),
             transforms.Normalize([0.5],[0.5])])
 
-        self.trainset = OrganData(data_path=os.path.join(self.data_path, 'train'),
-                                  transform=self.train_transform)
-        self.testset = OrganData(data_path=os.path.join(self.data_path, 'test'),
-                                 transform=self.val_transform)
+        self.trainset = OrganData(data_path=os.path.join(self.data_path,'train'),
+                                    transform=self.train_transform)
+        self.testset = OrganData(data_path=os.path.join(self.data_path,'test'),
+                                    transform=self.val_transform,mode='test')
+
+        if kwargs['source_data_path2'] is not None:
+            train_set_list = [self.trainset]
+            test_set_list = [self.testset]
+            
+            self.data_path2 = kwargs['source_data_path2']
+            train_set_list.append(OrganData(data_path=os.path.join(self.data_path2, 'train'),
+                                            transform=self.train_transform))
+            test_set_list.append(OrganData(data_path=os.path.join(self.data_path2, 'test'),
+                                            transform=self.val_transform,mode='test'))
+            
+            if kwargs['source_data_path3'] is not None:
+                self.data_path3 = kwargs['source_data_path3']
+                train_set_list.append(OrganData(data_path=os.path.join(self.data_path3, 'train'),
+                                            transform=self.train_transform))
+                test_set_list.append(OrganData(data_path=os.path.join(self.data_path3, 'test'),
+                                            transform=self.val_transform,mode='test'))
+            
+            self.trainset = ConcatDataset(train_set_list)
+            self.testset = ConcatDataset(test_set_list)
 
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.dice_loss = DiceLoss()
@@ -126,7 +148,7 @@ class SegModel(pl.LightningModule):
         if self.loss_weight == 0.0:
             loss = self.bce_loss(output, label) + \
                 self.dice_loss(output, label)
-            #loss = self.bce_loss(output, label)
+
         else:
             loss = self.bce_loss(output, label) + \
                 self.dice_loss(output, label) + \
@@ -140,7 +162,6 @@ class SegModel(pl.LightningModule):
         metric_log = compute_performance(output, label,
                                          metric=['dice'],
                                          prefix='train')
-        #import ipdb; ipdb.set_trace()
         self.log_dict(metric_log,
                       on_step=True,
                       on_epoch=True,
@@ -149,11 +170,10 @@ class SegModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        img, label, _ = batch
+        img, label, _, _ = batch
         img = img.float()
 
         output, _ = self(img)
-        #loss = self.bce_loss(output, label) + self.dice_loss(output, label)
         loss = self.bce_loss(output, label)
 
         self.log('val_loss', loss,
@@ -162,7 +182,6 @@ class SegModel(pl.LightningModule):
         metric_log = compute_performance(output, label,
                                          metric=['confusion','dice','asd','acd'],
                                          prefix='val')
-        #import ipdb; ipdb.set_trace()
         self.log_dict(metric_log,
                       on_step=False,
                       on_epoch=True,
@@ -216,9 +235,6 @@ class SegModel(pl.LightningModule):
                           pin_memory=True)
 
     def test_dataloader(self):
-        self.testset = OrganData(data_path=os.path.join(self.data_path, 'test'),
-                                 transform=self.val_transform, mode='test')
-
         if self.use_ddp:
             test_sampler = distributed.DistributedSampler(self.testset)
         else:
@@ -230,12 +246,30 @@ class SegModel(pl.LightningModule):
                           pin_memory=True)
 
 
+    def target_test_dataloader(self):
+        self.target_testset = OrganData(data_path=self.target_data_path,
+                                        transform=self.val_transform, mode='test')
+
+        if self.use_ddp:
+            test_sampler = distributed.DistributedSampler(self.target_testset)
+        else:
+            test_sampler = None
+        return DataLoader(self.target_testset, batch_size=self.batch_size,
+                          shuffle=False,
+                          num_workers=4,
+                          sampler=test_sampler,
+                          pin_memory=True)
+
 
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser])
-        parser.add_argument("--data-path", type=str, default='/daintlab/data/segmentation/lits')
+        parser.add_argument("--data-path", type=str, default='/daintlab/data/lung_segmentation_dataset/JSRT_dataset')
+        parser.add_argument("--source-data-path2", type=str, default=None)
+        parser.add_argument("--source-data-path3", type=str, default=None)
+        parser.add_argument("--target-data-path", type=str, default=None)
         parser.add_argument("--arch", type=str, choices=['unet','unetpp','dlabv3','dlabv3p'])
+        parser.add_argument("--encoder", type=str, choices=['resnet34','resnet50'])
         parser.add_argument("--batch-size", type=int, default=32)
         parser.add_argument("--lr", type=float, default=0.01)
         parser.add_argument("--optim", type=str, default='sgd')
@@ -243,8 +277,8 @@ class SegModel(pl.LightningModule):
         parser.add_argument("--boundary-aware", action='store_true')
         parser.add_argument("--boundary-loc", type=str, default='both')
         parser.add_argument("--sampling-type", type=str, default='full')
-        parser.add_argument("--n-max-pos", type=int, default=128)
-        parser.add_argument("--neg-multiplier", type=int, default=1)
+        parser.add_argument("--n-max-pos", type=int, default=64)
+        parser.add_argument("--neg-multiplier", type=int, default=2)
         parser.add_argument("--num-layers", type=int, default=5)
         parser.add_argument("--features-start", type=int, default=64)
         parser.add_argument("--max-epochs", type=int, default=120)
@@ -259,7 +293,7 @@ def main(hparams):
 
     if hparams.logging:
         logger = CometLogger(api_key=os.environ.get('COMET_API_KEY'),
-                            workspace='beopst',
+                            workspace='swlee',
                             project_name=project_name,
                             experiment_name=hparams.exp)
         hparams.logger = logger
